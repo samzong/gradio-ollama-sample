@@ -1,6 +1,7 @@
 import os
+import sys
 import gradio as gr
-import openai
+import ollama
 from datetime import datetime
 from dotenv import load_dotenv
 import time
@@ -10,14 +11,25 @@ import re
 load_dotenv()
 
 # Environment variables configuration
-model_name = os.getenv("MODEL_NAME", "gpt-3.5-turbo")
-api_host = os.getenv("API_HOST", "http://localhost:11434/v1")
+os.environ['OLLAMA_HOST'] = os.getenv("OLLAMA_HOST", "http://localhost:11434")
 
-# Configure OpenAI client
-client = openai.OpenAI(
-    base_url=api_host,
-    api_key="sk-xxx"  # Ollama doesn't need an actual API key, but we need to set a placeholder
-)
+# Function to get available models using Ollama library
+def get_available_models():
+    try:
+        models = ollama.list()
+        return [model['name'] for model in models['models']]
+    except Exception as e:
+        print(f"Error fetching models: {e}")
+        sys.exit(1)
+
+# Get available models
+available_models = get_available_models()
+if not available_models:
+    print("No models available from Ollama service.")
+    sys.exit(1)
+
+# Set the default model to the first available model
+current_model = available_models[0]
 
 # Initialize conversations
 conversations = {}
@@ -27,8 +39,9 @@ def estimate_tokens(text):
     # This is a rough estimate. Actual token count may vary.
     return len(re.findall(r'\w+|[^\w\s]', text))
 
-def chat(message, history, conversation_id):
-    global conversations
+def chat(message, history, conversation_id, model):
+    global conversations, current_model
+    current_model = model
     if not conversation_id:
         conversation_id = datetime.now().strftime("%Y%m%d%H%M%S")
         conversations[conversation_id] = {"name": message[:20], "messages": []}
@@ -38,43 +51,53 @@ def chat(message, history, conversation_id):
     user_tokens = estimate_tokens(message)
     start_time = time.time()
     
-    response = client.chat.completions.create(
-        model=model_name,
-        messages=conversations[conversation_id]["messages"],
-        stream=True
-    )
+    try:
+        stream = ollama.chat(
+            model=current_model,
+            messages=conversations[conversation_id]["messages"],
+            stream=True
+        )
 
-    partial_message = ""
-    for chunk in response:
-        if chunk.choices[0].delta.content is not None:
-            partial_message += chunk.choices[0].delta.content
-            yield history + [[message, partial_message]], ""
+        partial_message = ""
+        for chunk in stream:
+            if 'message' in chunk:
+                content = chunk['message'].get('content', '')
+                partial_message += content
+                yield history + [[message, partial_message]], "", conversation_id, current_model
 
-    assistant_tokens = estimate_tokens(partial_message)
-    end_time = time.time()
-    time_taken = end_time - start_time
-    token_rate = (user_tokens + assistant_tokens) / time_taken if time_taken > 0 else 0
+        assistant_tokens = estimate_tokens(partial_message)
+        end_time = time.time()
+        time_taken = end_time - start_time
+        token_rate = (user_tokens + assistant_tokens) / time_taken if time_taken > 0 else 0
 
-    conversations[conversation_id]["messages"].append({"role": "assistant", "content": partial_message})
-    
-    info = f"""API Host: {api_host}
-Model: {model_name}
+        conversations[conversation_id]["messages"].append({"role": "assistant", "content": partial_message})
+        
+        info = f"""API Host: {os.environ['OLLAMA_HOST']}
+Model: {current_model}
 Estimated user message tokens: {user_tokens}
 Estimated assistant message tokens: {assistant_tokens}
 Estimated token rate: {token_rate:.2f} tokens/second"""
-    
-    yield history + [[message, partial_message]], info
+        
+        yield history + [[message, partial_message]], info, conversation_id, current_model
+
+    except Exception as e:
+        print(f"Error in API request: {e}")
+        yield history + [[message, f"Error: Unable to get response from the model. {str(e)}"]], "", conversation_id, current_model
 
 def get_conversation_list():
-    return [{"name": conv["name"], "id": conv_id} for conv_id, conv in conversations.items()]
+    return {conv["name"]: conv_id for conv_id, conv in conversations.items()}
 
 def start_new_conversation():
-    return None, [], ""
+    new_id = datetime.now().strftime("%Y%m%d%H%M%S")
+    conversations[new_id] = {"name": "New Conversation", "messages": []}
+    return new_id, [], "", current_model
 
-def load_conversation(conversation_id):
-    if conversation_id in conversations:
-        return [(msg["content"], conversations[conversation_id]["messages"][i+1]["content"])
-                for i, msg in enumerate(conversations[conversation_id]["messages"][:-1:2])], ""
+def load_conversation(conversation_name):
+    conversation_id = next((conv_id for conv_id, conv in conversations.items() if conv["name"] == conversation_name), None)
+    if conversation_id:
+        history = [(msg["content"], conversations[conversation_id]["messages"][i+1]["content"])
+                   for i, msg in enumerate(conversations[conversation_id]["messages"][:-1:2])]
+        return history, ""
     return [], ""
 
 # Gradio interface
@@ -89,29 +112,23 @@ with gr.Blocks(css="#chatbot { height: 400px; overflow-y: scroll; }") as demo:
             info = gr.Textbox(label="Model Info", lines=5, interactive=False)
         
         with gr.Column(scale=1):
-            conversation_list = gr.Dropdown(choices=get_conversation_list(), label="Conversations", interactive=True)
+            model_dropdown = gr.Dropdown(choices=available_models, label="Select Model", value=current_model)
+            conversation_list = gr.Dropdown(choices=[], label="Conversations", interactive=True)
             new_conversation = gr.Button("New Conversation")
     
     conversation_id = gr.State()
 
-    send.click(chat, inputs=[msg, chatbot, conversation_id], outputs=[chatbot, info])
-    msg.submit(chat, inputs=[msg, chatbot, conversation_id], outputs=[chatbot, info])
-    
-    new_conversation.click(start_new_conversation, outputs=[conversation_id, chatbot, info])
-    conversation_list.change(load_conversation, inputs=[conversation_list], outputs=[chatbot, info])
+    def update_conversation_list():
+        conv_list = get_conversation_list()
+        return gr.update(choices=list(conv_list.keys()))
 
-    gr.HTML("""
-    <script src="/static/script.js"></script>
-    <style>
-    body.dark {
-        background-color: #1a1a1a;
-        color: #ffffff;
-    }
+    send.click(chat, inputs=[msg, chatbot, conversation_id, model_dropdown], outputs=[chatbot, info, conversation_id, model_dropdown]).then(
+        update_conversation_list, outputs=[conversation_list])
+    msg.submit(chat, inputs=[msg, chatbot, conversation_id, model_dropdown], outputs=[chatbot, info, conversation_id, model_dropdown]).then(
+        update_conversation_list, outputs=[conversation_list])
     
-    body.dark #chatbot {
-        background-color: #2a2a2a;
-    }
-    </style>
-    """)
+    new_conversation.click(start_new_conversation, outputs=[conversation_id, chatbot, info, model_dropdown]).then(
+        update_conversation_list, outputs=[conversation_list])
+    conversation_list.change(load_conversation, inputs=[conversation_list], outputs=[chatbot, info])
 
 demo.launch()
