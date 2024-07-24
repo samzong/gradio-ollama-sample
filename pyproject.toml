@@ -1,0 +1,18 @@
+[tool.poetry]
+name = "ai-chat"
+version = "0.1.0"
+description = ""
+authors = ["samzong.lu <samzong.lu@gmail.com>"]
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "^3.10"
+python-dotenv = "^1.0.1"
+gradio = "^4.39.0"
+openai = "^1.37.0"
+tiktoken = "^0.7.0"
+
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
