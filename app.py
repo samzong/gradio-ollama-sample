@@ -26,6 +26,9 @@ with gr.Blocks(css="#chatbot1, #chatbot2 { height: 400px; overflow-y: scroll; }"
     gr.Markdown("# AI Chat")
 
     with gr.Row():
+        compare_button = gr.Button("Toggle Comparison Mode")
+
+    with gr.Row():
         with gr.Column(scale=1):
             model_dropdown1 = gr.Dropdown(
                 choices=available_models, label="Model 1", value=current_model)
@@ -43,9 +46,6 @@ with gr.Blocks(css="#chatbot1, #chatbot2 { height: 400px; overflow-y: scroll; }"
     with gr.Row():
         msg = gr.Textbox(placeholder="Enter your message here...", scale=3)
         send = gr.Button("Send", scale=1)
-
-    with gr.Row():
-        compare_button = gr.Button("Toggle Comparison Mode")
 
     is_compare_mode = gr.State(False)
 
